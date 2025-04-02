@@ -1,148 +1,166 @@
-# ------------- src/ai_explainer.py -------------
-from transformers import pipeline, set_seed
-import warnings
-import logging # Use logging instead of print for errors
+import os
+import subprocess
+import logging
+import json
 
 # Configure logging
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-warnings.filterwarnings('ignore', category=FutureWarning)
-warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`") # Suppress specific warning
+# Set Ollama model and storage path
+DEFAULT_MODEL = "llama3.2"
+OLLAMA_HOME_DIR = "F:\\Projects\\ollama_models"  # Custom path for Ollama models
 
 class AIExplainer:
-    def __init__(self, model_name='distilgpt2'): # Changed default to a smaller, faster model
+    def __init__(self, model_name=DEFAULT_MODEL):
         """
-        Initializes the AI Explainer.
+        Initializes the AI Explainer using Ollama for local inference.
         Args:
-            model_name (str): The name of the Hugging Face transformer model to use.
-                              'gpt2' or 'distilgpt2' are options. Larger models like
-                              'gpt-3.5-turbo' via API would require different setup.
+            model_name (str): The name of the local Ollama model to use.
         """
         self.model_name = model_name
-        self.generator = None
+        
+        # Set custom Ollama path
+        os.environ["OLLAMA_MODELS"] = OLLAMA_HOME_DIR
+        logging.info(f"Setting Ollama models path to: {OLLAMA_HOME_DIR}")
+        
+        self.ollama_installed = self._check_ollama_installed()
+        
+        if not self.ollama_installed:
+            logging.error("Ollama is not installed or not in PATH. Please install it from https://ollama.com/")
+            return
+        
+        self._check_and_download_model()
+
+    def _check_ollama_installed(self):
+        """Check if Ollama is installed by running `ollama list`."""
         try:
-            # Increased max_length for more detailed feedback
-            # Consider adding truncation=True if needed, but might cut off explanations
-            self.generator = pipeline(
-                'text-generation',
-                model=self.model_name,
-                max_new_tokens=200 # Use max_new_tokens instead of max_length for better control
-            )
-            logging.info(f"AI Explainer initialized successfully with model: {self.model_name}")
-        except Exception as e:
-            logging.error(f"AI Explainer initialization error with model '{self.model_name}': {e}", exc_info=True)
-            self.generator = None # Ensure generator is None if init fails
+            env = os.environ.copy()
+            subprocess.run(["ollama", "list"], check=True, capture_output=True, text=True, env=env)
+            return True
+        except FileNotFoundError:
+            return False
+        except subprocess.CalledProcessError:
+            return False
+
+    def _check_and_download_model(self):
+        """Ensure the specified model is available locally."""
+        env = os.environ.copy()
+        result = subprocess.run(["ollama", "list"], capture_output=True, text=True, env=env)
+        if self.model_name not in result.stdout:
+            logging.info(f"Model {self.model_name} not found locally. Downloading to {OLLAMA_HOME_DIR}...")
+            subprocess.run(["ollama", "pull", self.model_name], check=True, env=env)
+        else:
+            logging.info(f"Model {self.model_name} is already available locally.")
 
     def generate_feedback(self, analysis_results):
         """
-        Generates natural language feedback based on comprehensive analysis results.
+        Generates natural language feedback based on password security analysis.
         Args:
-            analysis_results (dict): A dictionary containing results from
-                                     PasswordAnalyzer and AdvancedPasswordAnalyzer.
+            analysis_results (dict): Dictionary containing password security details.
         Returns:
-            str: AI-generated feedback string, or an error/fallback message.
+            str: AI-generated feedback or fallback message.
         """
-        if self.generator is None:
-            logging.warning("AI Explainer generator not available.")
-            return "AI feedback generation is currently unavailable. Please rely on the structured analysis results."
-
+        if not self.ollama_installed:
+            return "AI feedback generation is unavailable. Please review the security analysis manually."
+        
         try:
-            # --- Build a Detailed Prompt ---
-            prompt = "Analyze the following password security report and provide actionable feedback:\n\n"
-            prompt += "## Password Analysis Report ##\n"
-
-            # Policy Checks
-            prompt += "\n### Policy Compliance ###\n"
-            policy_checks = analysis_results.get('policy_checks', {})
-            detailed_policy = analysis_results.get('detailed_policy_checks', {})
-            all_policy_passed = policy_checks.get('all_passed', False)
-            if all_policy_passed:
-                 prompt += "- ✅ All basic policy requirements met.\n"
-            else:
-                 prompt += "- ❌ Basic policy requirements NOT met:\n"
-                 for check, passed in detailed_policy.items():
-                      if not passed:
-                           prompt += f"    - Missing requirement: {check}\n"
-
-            # Advanced Checks (Entropy, Breaches) - Add if available in analysis_results
-            advanced_metrics = analysis_results.get('advanced_metrics', {})
-            entropy = advanced_metrics.get('entropy')
-            breach_count = advanced_metrics.get('breach_count')
-            min_entropy_policy = analysis_results.get('policy', {}).get('min_entropy', 60) # Get from policy if passed in
-            max_breach_policy = analysis_results.get('policy', {}).get('max_breach_count', 0)
-
-            prompt += "\n### Advanced Security Metrics ###\n"
-            if entropy is not None:
-                entropy_passed = entropy >= min_entropy_policy
-                prompt += f"- Entropy Score: {entropy:.1f} bits ({'✅ Meets' if entropy_passed else '❌ Below'} minimum of {min_entropy_policy})\n"
-            if breach_count is not None:
-                breach_passed = breach_count <= max_breach_policy
-                if breach_passed:
-                    prompt += "- ✅ Not found in known data breaches.\n"
-                else:
-                    prompt += f"- ❌ Found in {breach_count:,} known data breaches!\n"
-
-            # Pattern Analysis
-            patterns = analysis_results.get('pattern_analysis', {}).get('patterns_found', [])
-            prompt += "\n### Detected Patterns & Weaknesses ###\n"
-            if patterns:
-                prompt += "- Common patterns/weaknesses detected:\n"
-                for pattern in patterns:
-                    prompt += f"    - {pattern}\n"
-            else:
-                prompt += "- No common patterns detected.\n"
-
-            # ML Analysis (Optional inclusion in prompt)
-            ml_analysis = analysis_results.get('ml_analysis', {})
-            ml_score = ml_analysis.get('strength_score')
-            if ml_score is not None:
-                prompt += f"- ML Strength Prediction Score: {ml_score:.2f}\n"
-
-
-            # --- Instructions for the AI ---
-            prompt += "\n## AI Feedback Request ##\n"
-            prompt += "Based *only* on the report above, please provide:\n"
-            prompt += "1.  A brief overall summary of the password's security posture.\n"
-            prompt += "2.  Specific, actionable recommendations to address the identified weaknesses (like missing requirements, low entropy, breaches, or patterns). Explain *why* these changes improve security.\n"
-            prompt += "3.  Avoid suggesting completely new passwords, focus on improving the analyzed characteristics.\n"
-            prompt += "Keep the feedback concise and easy to understand.\n\n"
-            prompt += "AI Feedback:"
-            # --- End Prompt ---
-
-            # Set seed for potential reproducibility if needed
-            # set_seed(42)
-
-            # Generate text
-            response = self.generator(prompt, num_return_sequences=1)[0]['generated_text']
-
-            # Extract only the part after "AI Feedback:"
-            feedback = response.split("AI Feedback:")[-1].strip()
-
-            # Basic cleanup (remove potential repetition of the prompt)
-            if feedback.startswith("Based only on the report above"):
-                 feedback = "Apologies, the AI repeated the request. Please review the structured analysis for details."
-
-            return feedback if feedback else "AI model returned an empty response."
-
+            system_prompt = "You are a password security assistant providing professional feedback."
+            user_input = """
+            Please analyze this password security report:
+            
+            Policy Compliance: {policy_compliance}
+            Entropy: {entropy} bits
+            Breach Count: {breach_count}
+            Patterns Detected: {patterns}
+            ML Strength Score: {ml_score}
+            
+            Provide: 1) Overall assessment, 2) Key issues, 3) Improvement advice.
+            """.format(
+                policy_compliance="All requirements met" if analysis_results.get('policy_checks', {}).get('all_passed', False) else "Some requirements missing",
+                entropy=analysis_results.get('advanced_metrics', {}).get('entropy', 'N/A'),
+                breach_count=analysis_results.get('advanced_metrics', {}).get('breach_count', 'N/A'),
+                patterns=", ".join(analysis_results.get('pattern_analysis', {}).get('patterns_found', [])) or "None",
+                ml_score=analysis_results.get('ml_analysis', {}).get('strength_score', 'N/A')
+            )
+            
+            prompt = f"{system_prompt}\n\n{user_input}"
+            
+            # Call Ollama model to generate response with custom environment
+            env = os.environ.copy()
+            result = subprocess.run([
+                "ollama", "run", self.model_name, prompt
+            ], capture_output=True, text=True, env=env)
+            
+            response = result.stdout.strip()
+            
+            return response if response else "Unable to generate AI feedback. Please review the security analysis manually."
+        
         except Exception as e:
             logging.error(f"Error during AI feedback generation: {e}", exc_info=True)
-            return f"Unable to generate AI feedback due to an internal error ({type(e).__name__})."
-
-# Example usage:
-if __name__ == '__main__':
-    # Create dummy analysis results for testing
-    dummy_results = {
-        'policy_checks': {'length': True, 'lower': True, 'upper': False, 'digit': True, 'special': False, 'all_passed': False},
-        'detailed_policy_checks': {'Length': True, 'Lowercase': True, 'Uppercase': False, 'Digit': True, 'Special': False},
-        'pattern_analysis': {'patterns_found': ["Common pattern: word followed by numbers", "Contains common word: 'password'"], 'character_diversity': 0.6},
-        'ml_analysis': {'strength_score': 0.15, 'is_strong_prediction': False},
-        'advanced_metrics': {'entropy': 45.2, 'breach_count': 3, 'complexity_score': 0.1},
-        'policy': {'min_entropy': 60, 'max_breach_count': 0} # Include policy for context
-    }
-
-    print("--- Initializing AI Explainer ---")
-    explainer = AIExplainer() # Uses distilgpt2 by default
-    print("\n--- Generating Feedback ---")
-    feedback = explainer.generate_feedback(dummy_results)
-    print("\n--- AI Feedback ---")
-    print(feedback)
+            return "AI feedback could not be generated due to an error."
+            
+    def enhance_password(self, password, original_analysis):
+        """
+        Use the AI model to generate personalized, stronger versions of the user's password.
+        
+        Args:
+            password (str): The original password
+            original_analysis (dict): Analysis results of the original password
+            
+        Returns:
+            str: An enhanced version of the password
+        """
+        if not self.ollama_installed or not password:
+            return None
+            
+        try:
+            # Extract key insights from the analysis
+            policy_issues = []
+            if original_analysis.get('policy_checks'):
+                for check, passed in original_analysis.get('policy_checks').items():
+                    if check != 'all_passed' and not passed:
+                        policy_issues.append(check)
+            
+            patterns = original_analysis.get('pattern_analysis', {}).get('patterns_found', [])
+            
+            system_prompt = "You are a password enhancement assistant. You generate secure variations of passwords while maintaining some recognizable elements."
+            user_input = f"""
+            Original password: {password}
+            
+            Issues to fix:
+            - Policy issues: {', '.join(policy_issues) if policy_issues else 'None'}
+            - Patterns detected: {', '.join(patterns) if patterns else 'None'}
+            
+            Create a more secure version of this password by:
+            1. Replacing some characters with similar-looking special characters or numbers
+            2. Adding complexity while keeping some original elements recognizable
+            3. Making it at least 12 characters long
+            4. Including uppercase, lowercase, numbers, and special characters
+            
+            Return ONLY the enhanced password, nothing else.
+            """
+            
+            prompt = f"{system_prompt}\n\n{user_input}"
+            
+            # Call Ollama model
+            env = os.environ.copy()
+            result = subprocess.run([
+                "ollama", "run", self.model_name, prompt
+            ], capture_output=True, text=True, env=env)
+            
+            enhanced_password = result.stdout.strip()
+            
+            # Clean up the result (sometimes models output additional text)
+            # Look for a line that looks like a password (no spaces, reasonable length)
+            lines = enhanced_password.split('\n')
+            for line in lines:
+                clean_line = line.strip()
+                if clean_line and ' ' not in clean_line and 8 <= len(clean_line) <= 30:
+                    enhanced_password = clean_line
+                    break
+            
+            return enhanced_password
+            
+        except Exception as e:
+            logging.error(f"Error during AI password enhancement: {e}", exc_info=True)
+            return None
