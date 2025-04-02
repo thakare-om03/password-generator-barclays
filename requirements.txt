@@ -1,0 +1,10 @@
+streamlit
+bcrypt
+scikit-learn
+transformers
+pandas
+numpy
+joblib
+requests
+PyYAML
+tqdm

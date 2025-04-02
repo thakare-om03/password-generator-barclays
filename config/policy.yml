@@ -1,0 +1,13 @@
+# ------------- config/policy.yml -------------
+# Defines the password security policy for the system.
+password_policy:
+  min_length: 12 # Adjusted minimum length (Original was 23, using a more common default here)
+  require_upper: true
+  require_lower: true
+  require_digits: true
+  require_special: true
+  # Advanced checks thresholds
+  max_breach_count: 0 # Password must not appear in known breaches
+  min_entropy: 60    # Minimum required estimated entropy (bits)
+  # Allowed special characters (adjust as needed)
+  special_chars: '!@#$%^&*(),.?":{}|<>'
